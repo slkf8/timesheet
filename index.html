@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="theme-color" content="#0a0a0a" />
+
+  <!-- iOS：加入主畫面圖示與全螢幕 -->
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Timesheet" />
+<title>Timesheet</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html,body{height:100%;}
+    .tabular-nums{font-variant-numeric:tabular-nums;}
+    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+  </style>
+</head>
+<body class="min-h-screen bg-neutral-950 text-neutral-100">
+  <!-- 可選：將你的 CSV 直接貼在下方 script 內 → 此頁就自帶資料 -->
+  <script id="embedded-master-csv" type="text/plain" data-format="csv">
+  </script>
+
+  <div id="root"></div>
+
+  <!-- React 18 + Babel Standalone (UMD) -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- 重要：指定 Babel 預設，否則 JSX 可能不被轉譯導致 Script error -->
+  <script type="text/babel" data-presets="env,react">
+        if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js', { scope: './' });
+      });
+    }
+    
+    const {useEffect, useMemo, useRef, useState} = React;
+
+    // ===== Error Boundary：更清楚地顯示錯誤而不是瀏覽器的 "Script error" =====
+    class ErrorBoundary extends React.Component {
+      constructor(props){ super(props); this.state = {error:null}; }
+      static getDerivedStateFromError(error){ return {error}; }
+      componentDidCatch(error, info){ console.error('[ErrorBoundary]', error, info); }
+      render(){
+        if (this.state.error){
+          return (
+            <div className="max-w-3xl mx-auto m-6 p-4 rounded-xl bg-red-900/30 border border-red-800">
+              <div className="font-semibold mb-1">執行錯誤</div>
+              <div className="text-sm opacity-90 mono whitespace-pre-wrap">{String(this.state.error)}</div>
+              <div className="text-xs opacity-70 mt-2">如持續出現，請嘗試重新整理或清除本機資料。</div>
+            </div>
+          );
+        }
+        return this.props.children;
+      }
+    }
+
+    // ===== 工具 =====
+    const pad2 = (n) => (n < 10 ? `0${n}` : String(n));
+    const ymKey = (y, m) => `${y}-${pad2(m)}`; // YYYY-MM
+    const ymd = (y, m, d) => `${y}-${pad2(m)}-${pad2(d)}`; // YYYY-MM-DD
+    const daysInMonth = (year, m) => new Date(year, m, 0).getDate();
+    const firstWeekdayOfMonth = (year, m) => new Date(year, m - 1, 1).getDay(); // 0..6
+
+    // ===== 時間：以「分鐘」計再轉小時，避免逐筆四捨五入誤差 =====
+    const isValidTime = (t) => /^(\d{1,2}|24):[0-5]\d$/.test(t) && ( () => { const [h,m]=t.split(':').map(Number); return h>=0 && h<=24 && m>=0 && m<=59 && (h!==24 || m===0); })();
+    const timeToMinutes = (t) => { const [h,m] = t.split(':').map(Number); return h*60 + m; };
+    const diffMinutes = (start,end,breakMin) => { 
+      if(!isValidTime(start) || !isValidTime(end)) return 0;
+      let s = timeToMinutes(start); let e = timeToMinutes(end);
+      if (e < s) e += 24*60; // 跨午夜
+      const raw = Math.max(0, e - s);
+      const b = Math.max(0, Number(breakMin||0));
+      return Math.max(0, (raw - b) | 0);
+    };
+    const minutesToHours = (mins) => Math.max(0, mins)/60;
+
+    // 24小時制選擇器輔助：把 HH:MM <-> 整數小時/分鐘
+    const parseHM = (s) => {
+      const [h,m] = (s||'00:00').split(':').map((x)=>parseInt(x,10));
+      return { h: isNaN(h)?0:h, m: isNaN(m)?0:m };
+    };
+    const toHM = (h,m) => `${pad2(h)}:${pad2(m)}`;
+
+    const uuid = () => (typeof crypto !== 'undefined' && crypto.getRandomValues)
+      ? crypto.getRandomValues(new Uint32Array(4)).join('-')
+      : `${Date.now()}-${Math.random()}`;
+    const keyOfShift = (s) => `${s.date}|${s.start}|${s.end}|${s.breakMin}|${s.notes||''}`;
+
+    // ===== Master CSV 讀寫（單檔） =====
+    const CSV_HEADER = 'type,date,start,end,break_min,rate,notes';
+
+    const monthFromDate = (d) => {
+      if (!d || d.length < 7) return null;
+      const ym = d.slice(0,7);
+      const y = Number(ym.slice(0,4));
+      const m = Number(ym.slice(5,7));
+      if (!Number.isInteger(y) || !Number.isInteger(m) || m<1 || m>12) return null;
+      return `${y}-${pad2(m)}`;
+    };
+
+    function prevYM(ym){
+      if(!ym||ym.length<7) return null;
+      const y = parseInt(ym.slice(0,4),10);
+      const m = parseInt(ym.slice(5,7),10);
+      if(!y||!m) return null;
+      let yy=y, mm=m-1; if(mm<1){ yy--; mm=12; }
+      return `${yy}-${pad2(mm)}`;
+    }
+    function getEffectiveRate(ym, rates){
+      // 向前尋找最近設定的時薪（最多追溯 48 個月）
+      let cur = ym;
+      for(let i=0;i<48;i++){
+        if(typeof rates[cur]==='number') return rates[cur];
+        const p = prevYM(cur); if(!p) break; cur = p;
+      }
+      return undefined;
+    }
+
+    function parseMasterCsvText(text){
+      const lines = (text||'').split(/\r?\n/).map(l => l.trim());
+      const rateByMonth = {}; const shifts = [];
+      for (const raw of lines){
+        const line = raw.trim();
+        if (!line || line.startsWith('#') || line.toLowerCase() === CSV_HEADER) continue;
+        const cells = line.split(',');
+        const type = (cells[0]||'').trim().toLowerCase();
+        if (type === 'rate'){
+          const ym = monthFromDate((cells[1]||'').trim());
+          const r = Number((cells[5]||'').trim());
+          if (ym && !Number.isNaN(r)) rateByMonth[ym] = r; // 後者覆蓋前者
+          continue;
+        }
+        if (type === 'shift'){
+          const date = (cells[1]||'').trim();
+          const start = (cells[2]||'').trim();
+          const end = (cells[3]||'').trim();
+          const breakMin = Number((cells[4]||'0').trim()) || 0;
+          const notes = (cells[6]||'').trim();
+          if (!date || !start || !end) continue;
+          shifts.push({ id: uuid(), date, start, end, breakMin, notes });
+          continue;
+        }
+      }
+      return { rateByMonth, shifts };
+    }
+
+    function toMasterCsvText(data){
+      const rows = [];
+      rows.push('# Timesheet Master CSV');
+      rows.push(CSV_HEADER);
+      const yms = Object.keys(data.rateByMonth).sort();
+      for (const ym of yms){
+        const r = data.rateByMonth[ym];
+        if (typeof r === 'number') rows.push(['rate', ym, '', '', '', String(r), ''].join(','));
+      }
+      const list = [...data.shifts].sort((a,b)=> a.date.localeCompare(b.date) || a.start.localeCompare(b.start));
+      for (const s of list){
+        rows.push(['shift', s.date, s.start, s.end, String(s.breakMin||0), '', (s.notes||'').replace(/\n/g,' ')].join(','));
+      }
+      return rows.join('\n');
+    }
+
+    function mergeMasterIntoData(fileData, prev){
+      const rateByMonth = { ...prev.rateByMonth, ...fileData.rateByMonth };
+      const seen = new Set(prev.shifts.map(s => keyOfShift(s)));
+      const merged = [...prev.shifts];
+      for (const s of fileData.shifts){
+        const k = keyOfShift(s);
+        if (!seen.has(k)){ seen.add(k); merged.push({ ...s, id: uuid() }); }
+      }
+      return { rateByMonth, shifts: merged };
+    }
+
+    function App(){
+      const today = new Date();
+      const [year, setYear] = useState(today.getFullYear());
+      const [month, setMonth] = useState(today.getMonth()+1);
+      const currentYM = useMemo(()=> ymKey(year, month), [year, month]);
+
+      const LS_DATA_KEY = 'timesheet-master-data-v1';
+      const LS_FLAG_KEY = 'timesheet-has-master-v1';
+
+      const [data, setData] = useState(() => {
+        try{ const raw = localStorage.getItem(LS_DATA_KEY); if (raw) return JSON.parse(raw); }catch{}
+        return { rateByMonth: {}, shifts: [] };
+      });
+      const [hasMaster, setHasMaster] = useState(()=>{ try{ return localStorage.getItem(LS_FLAG_KEY)==='1'; }catch{ return false; } });
+
+      useEffect(()=>{ try{ localStorage.setItem(LS_DATA_KEY, JSON.stringify(data)); }catch{} }, [data]);
+      useEffect(()=>{ try{ localStorage.setItem(LS_FLAG_KEY, hasMaster?'1':'0'); }catch{} }, [hasMaster]);
+
+      // 匯出 CSV 與 內嵌 HTML
+      const [exportUrl, setExportUrl] = useState(null);
+      const [exportCsv, setExportCsv] = useState('');
+      const exportUrlRef = useRef(null);
+      const [htmlUrl, setHtmlUrl] = useState(null);
+      const [htmlText, setHtmlText] = useState('');
+      const htmlUrlRef = useRef(null);
+      useEffect(()=>()=>{ if (exportUrlRef.current) URL.revokeObjectURL(exportUrlRef.current); if (htmlUrlRef.current) URL.revokeObjectURL(htmlUrlRef.current); },[]);
+
+      const monthShifts = useMemo(()=> data.shifts.filter(s=> s.date.startsWith(currentYM)), [data.shifts, currentYM]);
+      const rate = data.rateByMonth[currentYM];
+      const effectiveRate = useMemo(()=> getEffectiveRate(currentYM, data.rateByMonth), [currentYM, data.rateByMonth]);
+      const totals = useMemo(()=>{
+        let mins = 0; for (const s of monthShifts) mins += diffMinutes(s.start, s.end, s.breakMin);
+        const hours = minutesToHours(mins);
+        const pay = (typeof effectiveRate === 'number') ? Math.round(hours*effectiveRate*100)/100 : undefined;
+        return { hours: Math.round(hours*100)/100, pay };
+      }, [monthShifts, effectiveRate]);
+
+      const byDate = useMemo(()=>{
+        const m = new Map();
+        for (const s of monthShifts){ if(!m.has(s.date)) m.set(s.date, []); m.get(s.date).push(s); }
+        return m;
+      }, [monthShifts]);
+
+      const [editingDate, setEditingDate] = useState(null);
+      const [draft, setDraft] = useState({ id: undefined, start:'09:00', end:'18:00', breakMin:0, notes:'' });
+
+      const [toast, setToast] = useState('');
+      const showToast = (msg) => { setToast(msg); setTimeout(()=>setToast(''), 2200); };
+
+      // 貼上CSV導入用（先前漏掉這兩個 state 會導致 ReferenceError → Script error）
+      const [showPaste, setShowPaste] = useState(false);
+      const [pasteText, setPasteText] = useState('');
+
+      const openDay = (d) => { setEditingDate(ymd(year, month, d)); setDraft({ id: undefined, start:'09:00', end:'18:00', breakMin:0, notes:'' }); };
+
+      const addOrUpdateShift = () => {
+        if (!editingDate) return;
+        const start = (draft.start||'').trim();
+        const end = (draft.end||'').trim();
+        const breakMin = Number(draft.breakMin||0);
+        if (!isValidTime(start) || !isValidTime(end)) return alert('請輸入有效的開始/結束時間（00:00~24:00；24:00 可用於跨日）');
+        const newShift = { id: draft.id || uuid(), date: editingDate, start, end, breakMin, notes: (draft.notes||'').trim() };
+        setData(prev => ({ ...prev, shifts: draft.id ? prev.shifts.map(s=> s.id===draft.id? newShift: s) : [...prev.shifts, newShift] }));
+        setDraft({ id: undefined, start, end, breakMin, notes: (draft.notes||'') });
+      };
+      const editShift = (s) => { setEditingDate(s.date); setDraft({ ...s }); };
+      const deleteShift = (id) => setData(prev => ({ ...prev, shifts: prev.shifts.filter(s=> s.id!==id) }));
+      const setRateForCurrentMonth = (val) => setData(prev => ({ ...prev, rateByMonth: { ...prev.rateByMonth, [currentYM]: val } }));
+
+      const importMasterCsv = async (file) => {
+        const text = await file.text();
+        const fileData = parseMasterCsvText(text);
+        setData(prev => mergeMasterIntoData(fileData, prev));
+        setHasMaster(true);
+        showToast('已導入主檔並合併資料');
+      };
+      const importMasterCsvText = (text) => {
+        const fileData = parseMasterCsvText(text);
+        setData(prev => mergeMasterIntoData(fileData, prev));
+        setHasMaster(true);
+        showToast('已導入（貼上/內嵌）並合併資料');
+      };
+
+      // 啟動時若此頁已有內嵌 CSV，且本機尚無資料 → 自動讀取
+      useEffect(()=>{
+        try{
+          const el = document.getElementById('embedded-master-csv');
+          if (el && el.textContent && el.textContent.trim()){
+            const noLocal = data.shifts.length===0 && Object.keys(data.rateByMonth).length===0;
+            if (noLocal) importMasterCsvText(el.textContent);
+          }
+        }catch{}
+      }, []);
+
+      // 匯出：產生 CSV 下載/複製
+      const prepareExport = () => {
+        const csv = toMasterCsvText(data);
+        setExportCsv(csv);
+        try {
+          const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+          if (exportUrlRef.current) URL.revokeObjectURL(exportUrlRef.current);
+          const url = URL.createObjectURL(blob);
+          exportUrlRef.current = url;
+          setExportUrl(url);
+          setHasMaster(true);
+          showToast('已生成匯出檔，請用下方「下載 / 新分頁 / 複製」');
+        } catch (e) {
+          setExportUrl(null);
+          showToast('已生成 CSV 文字，請用「複製 CSV」');
+        }
+      };
+
+      const copyCsv = async () => {
+        const text = exportCsv || toMasterCsvText(data);
+        setExportCsv(text);
+        try { await navigator.clipboard.writeText(text); showToast('已複製 CSV'); }
+        catch (e){
+          const ta = document.createElement('textarea');
+          ta.value = text; document.body.appendChild(ta); ta.select();
+          try { document.execCommand('copy'); showToast('已複製 CSV'); }
+          catch(e2){ showToast('請手動選取下方文字複製'); }
+          ta.remove();
+        }
+      };
+
+      // 內嵌資料：在 HTML 內寫入/讀取 + 產生「自帶資料的單檔 HTML」
+      const readEmbedded = () => {
+        const el = document.getElementById('embedded-master-csv');
+        if (!el){ showToast('本頁沒有內嵌資料區塊'); return; }
+        const t = (el.textContent||'').trim();
+        if (!t) { showToast('內嵌區塊為空'); return; }
+        importMasterCsvText(t);
+      };
+
+      const writeEmbeddedToDom = () => {
+        const csv = toMasterCsvText(data);
+        let el = document.getElementById('embedded-master-csv');
+        if (!el){
+          el = document.createElement('script');
+          el.id = 'embedded-master-csv';
+          el.type = 'text/plain';
+          el.setAttribute('data-format','csv');
+          document.body.appendChild(el);
+        }
+        el.textContent = csv;
+        showToast('已寫入本頁內嵌資料（僅此頁暫存）');
+      };
+
+      const buildHtmlWithEmbedded = () => {
+        const csv = toMasterCsvText(data);
+        const clone = document.documentElement.cloneNode(true);
+        let el = clone.querySelector('#embedded-master-csv');
+        if (!el){
+          el = clone.ownerDocument.createElement('script');
+          el.id = 'embedded-master-csv';
+          el.type = 'text/plain';
+          el.setAttribute('data-format','csv');
+          clone.querySelector('body').appendChild(el);
+        }
+        el.textContent = csv;
+        return '<!doctype html>\n' + clone.outerHTML;
+      };
+
+      const generateSelfContainedHtml = () => {
+        const html = buildHtmlWithEmbedded();
+        setHtmlText(html);
+        try {
+          const blob = new Blob([html], { type:'text/html;charset=utf-8' });
+          if (htmlUrlRef.current) URL.revokeObjectURL(htmlUrlRef.current);
+          const url = URL.createObjectURL(blob);
+          htmlUrlRef.current = url;
+          setHtmlUrl(url);
+          showToast('已生成「含資料的 HTML」');
+        } catch (e) {
+          setHtmlUrl(null);
+          showToast('已生成 HTML 文字，請用「複製 HTML」');
+        }
+      };
+
+      const copyHtml = async () => {
+        const text = htmlText || buildHtmlWithEmbedded();
+        try { await navigator.clipboard.writeText(text); showToast('已複製 HTML'); }
+        catch (e){
+          const ta = document.createElement('textarea');
+          ta.value = text; document.body.appendChild(ta); ta.select();
+          try { document.execCommand('copy'); showToast('已複製 HTML'); } catch(e2){ showToast('請手動選取下方文字複製'); }
+          ta.remove();
+        }
+      };
+
+      const clearLocal = () => {
+        if (!confirm('清空本機保存（不影響已下載的 CSV/HTML）？')) return;
+        try { localStorage.removeItem(LS_DATA_KEY); localStorage.removeItem(LS_FLAG_KEY); } catch {}
+        setData({ rateByMonth: {}, shifts: [] });
+        setHasMaster(false);
+        setExportCsv(''); setHtmlText('');
+        if (exportUrlRef.current) { URL.revokeObjectURL(exportUrlRef.current); exportUrlRef.current = null; }
+        if (htmlUrlRef.current) { URL.revokeObjectURL(htmlUrlRef.current); htmlUrlRef.current = null; }
+        setExportUrl(null); setHtmlUrl(null);
+        showToast('已清空');
+      };
+
+      const gotoPrevMonth = () => { let y=year, m=month-1; if(m<1){y-=1;m=12;} setYear(y); setMonth(m); };
+      const gotoNextMonth = () => { let y=year, m=month+1; if(m>12){y+=1;m=1;} setYear(y); setMonth(m); };
+      const onPickMonth = (e) => { const [yy,mm] = e.target.value.split('-').map(x=>parseInt(x,10)); if(yy&&mm){ setYear(yy); setMonth(mm); } };
+
+      const dim = daysInMonth(year, month);
+      const firstWd = firstWeekdayOfMonth(year, month);
+      const cells = []; for(let i=0;i<firstWd;i++) cells.push({day:null}); for(let d=1; d<=dim; d++) cells.push({day:d}); while(cells.length%7!==0) cells.push({day:null});
+      const isToday = (d) => { const now = new Date(); return now.getFullYear()===year && (now.getMonth()+1)===month && now.getDate()===d; };
+      const dailySummary = (d) => {
+        const date = ymd(year, month, d);
+        const list = byDate.get(date) || [];
+        let mins=0; for (const s of list) mins += diffMinutes(s.start, s.end, s.breakMin);
+        const hours = minutesToHours(mins);
+        const pay = (typeof effectiveRate==='number') ? Math.round(hours*effectiveRate*100)/100 : undefined;
+        return { hours: Math.round(hours*100)/100, pay };
+      };
+
+      // ====== 簡易測試（單元測試） ======
+      const [testReport, setTestReport] = useState(null);
+      const runTests = () => {
+        const cases = [
+          { name: 'A. 09:00→18:00 休0', got: diffMinutes('09:00','18:00',0), exp: 9*60 },
+          { name: 'B. 09:00→18:00 休45', got: diffMinutes('09:00','18:00',45), exp: 8*60+15 },
+          { name: 'C. 23:30→00:30 休0 跨日', got: diffMinutes('23:30','00:30',0), exp: 60 },
+          { name: 'D. 18:00→24:00 休0', got: diffMinutes('18:00','24:00',0), exp: 6*60 },
+          { name: 'E. 10:00→11:00 休70 超額休息→0', got: diffMinutes('10:00','11:00',70), exp: 0 },
+          { name: 'F. 無效時間→0', got: diffMinutes('aa','bb',0), exp: 0 },
+          // 繼承時薪測試
+          { name: 'R1. 繼承時薪：2025-11=120，2025-12 未設 → 120', got: (function(){ const rates={'2025-11':120}; return getEffectiveRate('2025-12', rates); })(), exp: 120 },
+          { name: 'R2. 無上月時薪：2025-11 未設 → undefined', got: (function(){ const rates={}; return getEffectiveRate('2025-11', rates); })(), exp: undefined }
+        ];
+        const rows = cases.map(c=> ({...c, pass: c.got===c.exp}));
+        const ok = rows.every(r=>r.pass);
+        setTestReport({ ok, rows });
+        showToast(ok? '測試全部通過' : '有測試未通過，請展開檢視');
+      };
+
+      return (
+        <div className="max-w-6xl mx-auto p-6">
+          {toast && (<div className="mb-3 p-2 rounded-lg bg-emerald-800/30 border border-emerald-700 text-sm">{toast}</div>)}
+
+          <header className="flex flex-wrap items-center justify-between gap-4 mb-6">
+            <div className="flex items-center gap-2">
+              <button onClick={gotoPrevMonth} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">上一個月</button>
+              <div className="text-xl font-semibold tabular-nums">{year}年 {pad2(month)}月</div>
+              <button onClick={gotoNextMonth} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">下一個月</button>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="text-sm opacity-80">選擇月份</label>
+              <input type="month" value={`${year}-${pad2(month)}`} onChange={onPickMonth} className="px-2 py-2 rounded-lg bg-neutral-900 border border-neutral-700" />
+            </div>
+          </header>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <section className="lg:col-span-2">
+              <div className="grid grid-cols-7 text-center text-neutral-400 text-sm mb-2">
+                {'日一二三四五六'.split('').map((w,i)=> <div key={i} className="py-2">{w}</div>)}
+              </div>
+              <div className="grid grid-cols-7 gap-2">
+                {cells.map((c,idx)=>{
+                  if (c.day===null) return <div key={idx} className="h-28 rounded-2xl bg-neutral-900/40 border border-neutral-800"/>;
+                  const {hours, pay} = dailySummary(c.day);
+                  return (
+                    <button key={idx} onClick={()=>openDay(c.day)} className={`h-28 rounded-2xl border text-left p-3 flex flex-col gap-1 transition-colors ${isToday(c.day)?'bg-neutral-800 border-neutral-600':'bg-neutral-900/60 border-neutral-800 hover:border-neutral-600'}`}>
+                      <div className="flex items-center justify-between">
+                        <div className="text-lg font-semibold">{c.day}</div>
+                        {isToday(c.day) && <span className="text-xs px-2 py-0.5 rounded bg-emerald-600/20 border border-emerald-600/40">今天</span>}
+                      </div>
+                      <div className="mt-auto text-sm text-neutral-300">
+                        <div>工時：<span className="tabular-nums">{hours.toFixed(2)}</span> 小時</div>
+                        <div>金額：{typeof pay==='number' ? <span className="tabular-nums">{pay.toFixed(2)}</span> : '—'}</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <aside className="space-y-4">
+              <div className="p-4 rounded-2xl bg-neutral-900 border border-neutral-800">
+                <div className="text-base font-semibold mb-3">本月匯總</div>
+                <div className="space-y-1 text-sm">
+                  <div>總工時：<span className="tabular-nums font-mono">{totals.hours.toFixed(2)}</span> 小時</div>
+                  {hasMaster ? (
+                    <div>時薪：
+                      <input type="number" step="0.01" placeholder="輸入時薪..." value={rate ?? effectiveRate ?? ''}
+                        onChange={(e)=> setRateForCurrentMonth(e.target.value===''? undefined : Number(e.target.value))}
+                        className="ml-2 w-36 px-2 py-1 rounded bg-neutral-950 border border-neutral-700 focus:outline-none" />
+                    </div>
+                  ) : (
+                    <div className="text-xs text-amber-400/90">尚未導入/建立主檔：暫不顯示時薪欄位。請先「導入主檔」或「生成匯出」。</div>
+                  )}
+                  <div>本月金額：{typeof totals.pay==='number' ? <span className="tabular-nums font-mono">{totals.pay.toFixed(2)}</span> : '—'}</div>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-neutral-900 border border-neutral-800 space-y-3">
+                <div className="text-base font-semibold">Master CSV（單檔資料庫）</div>
+                <div className="text-xs text-neutral-400">結構：<span className="font-mono">{CSV_HEADER}</span></div>
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={()=>document.getElementById('master-file').click()} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">導入主檔</button>
+                  <input id="master-file" type="file" accept=".csv" className="hidden" onChange={(e)=>{ const f=e.target.files&&e.target.files[0]; if(f) importMasterCsv(f); e.target.value=''; }} />
+                  <button onClick={()=>setShowPaste(true)} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">貼上CSV導入</button>
+                  <button onClick={prepareExport} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">生成匯出</button>
+                  <button onClick={copyCsv} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">複製 CSV</button>
+                  <button onClick={clearLocal} className="px-3 py-2 rounded-xl bg-red-700/80 hover:bg-red-700">清空本機資料</button>
+                </div>
+
+                  {(exportCsv || exportUrl) && (
+                    <div className="space-y-2 mt-2 text-sm">
+                      <div className="flex flex-wrap gap-2">
+                        {exportUrl && (
+                          <>
+                            <a href={exportUrl} download="timesheet.csv" className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600">下載 .csv</a>
+                            <a href={exportUrl} target="_blank" rel="noopener" className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">新分頁開啟</a>
+                          </>
+                        )}
+                      </div>
+                      <textarea className="w-full h-32 p-2 rounded-lg bg-neutral-950 border border-neutral-700 font-mono text-xs" readOnly value={exportCsv} onFocus={(e)=>e.currentTarget.select()} />
+                      <div className="text-xs text-neutral-400">提示：若瀏覽器不允許一鍵複製，請於上方文字框手動全選複製。</div>
+                    </div>
+                  )}
+
+                  {/* 內嵌資料與單檔 HTML */}
+                <div className="pt-3 mt-2 border-t border-neutral-800 space-y-2">
+                  <div className="text-base font-semibold">內嵌資料 ＆ 單檔 HTML</div>
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={writeEmbeddedToDom} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">寫入本頁內嵌（暫存）</button>
+                    <button onClick={generateSelfContainedHtml} className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600">生成含資料的HTML</button>
+                    <button onClick={copyHtml} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">複製HTML</button>
+                    <button onClick={runTests} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">執行自測</button>
+                  </div>
+                  {(htmlText || htmlUrl) && (
+                    <div className="space-y-2 mt-2 text-sm">
+                      <div className="flex flex-wrap gap-2">
+                        {htmlUrl && (
+                          <a href={htmlUrl} download="timesheet-with-data.html" className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600">下載 .html（含資料）</a>
+                        )}
+                      </div>
+                      <textarea className="w-full h-40 p-2 rounded-lg bg-neutral-950 border border-neutral-700 font-mono text-xs" readOnly value={htmlText} onFocus={(e)=>e.currentTarget.select()} />
+                      <div className="text-xs text-neutral-400">提示：若剪貼簿權限受限，請於上方文字框手動全選複製。</div>
+                    </div>
+                  )}
+
+                  {testReport && (
+                    <div className="text-xs border border-neutral-800 rounded-xl p-2">
+                      <div className={"font-semibold mb-1 " + (testReport.ok? 'text-emerald-400':'text-amber-300')}>{testReport.ok? '所有測試通過 ✅' : '部份測試未通過 ⚠️'}</div>
+                      <table className="w-full text-left text-[11px] mono">
+                        <thead className="text-neutral-400"><tr><th className="py-1 pr-2">名稱</th><th className="py-1 pr-2">got</th><th className="py-1 pr-2">exp</th><th className="py-1">結果</th></tr></thead>
+                        <tbody>
+                          {testReport.rows.map((r,i)=> (
+                            <tr key={i} className="border-t border-neutral-800">
+                              <td className="py-1 pr-2">{r.name}</td>
+                              <td className="py-1 pr-2">{r.got}</td>
+                              <td className="py-1 pr-2">{r.exp}</td>
+                              <td className="py-1">{r.pass? '✅' : '❌'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {showPaste && (
+                  <div className="space-y-2">
+                    <textarea className="w-full h-32 p-2 rounded-lg bg-neutral-950 border border-neutral-700 font-mono text-xs" placeholder="在此貼上 CSV 文字..." value={pasteText} onChange={(e)=>setPasteText(e.target.value)} />
+                    <div className="flex flex-wrap gap-2">
+                      <button onClick={async()=>{ try{ const t=await navigator.clipboard.readText(); setPasteText(t); showToast('已貼上剪貼簿內容'); }catch{ showToast('無法讀取剪貼簿，請手動貼上'); } }} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">從剪貼簿貼上</button>
+                      <button onClick={()=>{ const t=(pasteText||'').trim(); if(!t){ alert('請貼上 CSV 文字'); return;} importMasterCsvText(t); setShowPaste(false); setPasteText(''); }} className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600">匯入</button>
+                      <button onClick={()=>{ setShowPaste(false); setPasteText(''); }} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">取消</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="p-4 rounded-2xl bg-neutral-900 border border-neutral-800 text-xs leading-relaxed">
+                <div className="font-semibold mb-1">CSV 示例</div>
+                <pre className="font-mono text-[11px] bg-neutral-950 border border-neutral-800 rounded p-2 overflow-x-auto whitespace-pre-wrap">{`type,date,start,end,break_min,rate,notes\nrate,2025-11,,,,120,\nshift,2025-11-03,09:00,18:00,0,,前台\nshift,2025-12-02,14:00,22:30,0,\nrate,2025-12,,,,130,`}</pre>
+                <ul className="list-disc pl-5 space-y-1 text-neutral-300 mt-2">
+                  <li><span className="font-mono">rate</span> 行：<span className="font-mono">date</span>=YYYY-MM；<span className="font-mono">rate</span> 欄填金額；同月最後一筆生效。</li>
+                  <li><span className="font-mono">shift</span> 行：<span className="font-mono">date</span>=YYYY-MM-DD；跨午夜自動處理。</li>
+                </ul>
+              </div>
+            </aside>
+          </div>
+
+          {editingDate && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+              <div className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="font-semibold">{editingDate} — 當日班次</div>
+                  <button onClick={()=>setEditingDate(null)} className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700">關閉</button>
+                </div>
+                <div className="space-y-2 max-h-64 overflow-auto pr-1">
+                  {(byDate.get(editingDate) || []).map((s)=>{
+                    const mins = diffMinutes(s.start, s.end, s.breakMin);
+                    const h = minutesToHours(mins);
+                    const pay = (typeof effectiveRate==='number') ? Math.round(h*effectiveRate*100)/100 : undefined;
+                    return (
+                      <div key={s.id} className="p-3 rounded-xl bg-neutral-950 border border-neutral-800 flex items-center justify-between gap-3">
+                        <div className="text-sm">
+                          <div className="tabular-nums">{s.start} → {s.end}（休息 {s.breakMin} 分）</div>
+                          {s.notes && <div className="opacity-80">備註：{s.notes}</div>}
+                          <div className="text-neutral-300 text-xs mt-0.5">工時 {h.toFixed(2)} 小時 {typeof pay==='number' ? `，金額 ${pay.toFixed(2)}` : ''}</div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={()=>editShift(s)} className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-sm">編輯</button>
+                          <button onClick={()=>deleteShift(s.id)} className="px-2 py-1 rounded-lg bg-red-700/80 hover:bg-red-700 text-sm">刪除</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {(byDate.get(editingDate) || []).length===0 && (
+                    <div className="text-sm text-neutral-400">尚無班次，請於下方新增。</div>
+                  )}
+                </div>
+                <div className="mt-4 p-3 rounded-xl bg-neutral-950 border border-neutral-800 space-y-3">
+                  <div className="font-semibold text-sm">{draft.id? '編輯班次':'新增班次'}</div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-sm">開始時間
+                      <div className="flex gap-2 mt-1 items-center">
+                        <select
+                          value={pad2(parseHM(draft.start||'09:00').h)}
+                          onChange={(e)=>{ const h=parseInt(e.target.value,10)||0; const m=parseHM(draft.start||'09:00').m; setDraft(d=>({...d, start: toHM(h,m)})); }}
+                          className="w-20 px-2 py-1 rounded bg-neutral-900 border border-neutral-700"
+                        >
+                          {[...Array(24)].map((_,i)=>(<option key={i} value={pad2(i)}>{pad2(i)}</option>))}
+                        </select>
+                        <span className="opacity-60">:</span>
+                        <select
+                          value={pad2(parseHM(draft.start||'09:00').m)}
+                          onChange={(e)=>{ const m=parseInt(e.target.value,10)||0; const h=parseHM(draft.start||'09:00').h; setDraft(d=>({...d, start: toHM(h,m)})); }}
+                          className="w-20 px-2 py-1 rounded bg-neutral-900 border border-neutral-700"
+                        >
+                          {[...Array(60)].map((_,i)=>(<option key={i} value={pad2(i)}>{pad2(i)}</option>))}
+                        </select>
+                      </div>
+                    </label>
+                    <label className="text-sm">結束時間
+                      <div className="flex gap-2 mt-1 items-center">
+                        <select
+                          value={pad2(parseHM(draft.end||'18:00').h)}
+                          onChange={(e)=>{ const h=parseInt(e.target.value,10)||0; const m=(h===24?0:parseHM(draft.end||'18:00').m); setDraft(d=>({...d, end: toHM(h,m)})); }}
+                          className="w-20 px-2 py-1 rounded bg-neutral-900 border border-neutral-700"
+                        >
+                          {[...Array(25)].map((_,i)=>(<option key={i} value={pad2(i)}>{pad2(i)}</option>))}
+                        </select>
+                        <span className="opacity-60">:</span>
+                        {parseHM(draft.end||'18:00').h===24 ? (
+                          <select disabled value="00" className="w-20 px-2 py-1 rounded bg-neutral-900 border border-neutral-700"><option value="00">00</option></select>
+                        ) : (
+                          <select
+                            value={pad2(parseHM(draft.end||'18:00').m)}
+                            onChange={(e)=>{ const m=parseInt(e.target.value,10)||0; const h=parseHM(draft.end||'18:00').h; setDraft(d=>({...d, end: toHM(h,m)})); }}
+                            className="w-20 px-2 py-1 rounded bg-neutral-900 border border-neutral-700"
+                          >
+                            {[...Array(60)].map((_,i)=>(<option key={i} value={pad2(i)}>{pad2(i)}</option>))}
+                          </select>
+                        )}
+                      </div>
+                    </label>
+                    <label className="text-sm">休息（分鐘）
+                      <select value={draft.breakMin ?? 0} onChange={(e)=>setDraft(d=>({...d, breakMin:Number(e.target.value||0)}))} className="w-full px-2 py-1 mt-1 rounded bg-neutral-900 border border-neutral-700">
+                        {[...Array(49)].map((_,i)=>{const m=i*5; return <option key={m} value={m}>{m} 分</option>;})}
+                      </select>
+                    </label>
+                    <label className="text-sm col-span-2">備註
+                      <input type="text" value={draft.notes||''} onChange={(e)=>setDraft(d=>({...d, notes:e.target.value}))} className="w-full px-2 py-1 mt-1 rounded bg-neutral-900 border border-neutral-700" placeholder="可留空" />
+                    </label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={addOrUpdateShift} className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600">{draft.id? '保存修改':'新增'}</button>
+                    {draft.id && (
+                      <button onClick={()=>setDraft({ id: undefined, start:'09:00', end:'18:00', breakMin:0, notes:'' })} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">改為新增</button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = document.getElementById('root');
+    ReactDOM.createRoot(root).render(
+      <ErrorBoundary>
+        <App/>
+      </ErrorBoundary>
+    );
+  </script>
+</body>
+</html>
