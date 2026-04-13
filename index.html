@@ -417,7 +417,7 @@
       };
 
       return (
-        <div className="max-w-6xl mx-auto p-6">
+        <div className="max-w-6xl mx-auto p-2 sm:p-6">
           {toast && (<div className="mb-3 p-2 rounded-lg bg-emerald-800/30 border border-emerald-700 text-sm">{toast}</div>)}
 
           <header className="flex flex-wrap items-center justify-between gap-4 mb-6">
@@ -434,22 +434,29 @@
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <section className="lg:col-span-2">
-              <div className="grid grid-cols-7 text-center text-neutral-400 text-sm mb-2">
-                {'日一二三四五六'.split('').map((w,i)=> <div key={i} className="py-2">{w}</div>)}
+              <div className="grid grid-cols-7 gap-0.5 sm:gap-2 text-center text-neutral-400 text-xs sm:text-sm mb-2">
+                {'日一二三四五六'.split('').map((w,i)=> <div key={i} className="py-1 sm:py-2">{w}</div>)}
               </div>
-              <div className="grid grid-cols-7 gap-2">
+              <div className="grid grid-cols-7 gap-0.5 sm:gap-2">
                 {cells.map((c,idx)=>{
-                  if (c.day===null) return <div key={idx} className="h-28 rounded-2xl bg-neutral-900/40 border border-neutral-800"/>;
+                  if (c.day===null) return <div key={idx} className="min-h-[3.5rem] sm:h-28 rounded-lg sm:rounded-2xl bg-neutral-900/40 border border-neutral-800"/>;
                   const {hours, pay} = dailySummary(c.day);
                   return (
-                    <button key={idx} onClick={()=>openDay(c.day)} className={`h-28 rounded-2xl border text-left p-3 flex flex-col gap-1 transition-colors ${isToday(c.day)?'bg-neutral-800 border-neutral-600':'bg-neutral-900/60 border-neutral-800 hover:border-neutral-600'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="text-lg font-semibold">{c.day}</div>
-                        {isToday(c.day) && <span className="text-xs px-2 py-0.5 rounded bg-emerald-600/20 border border-emerald-600/40">今天</span>}
+                    <button key={idx} onClick={()=>openDay(c.day)} className={`min-h-[3.5rem] sm:h-28 rounded-lg sm:rounded-2xl border text-left p-1 sm:p-3 flex flex-col gap-0.5 sm:gap-1 transition-colors ${isToday(c.day)?'bg-neutral-800 border-neutral-600':'bg-neutral-900/60 border-neutral-800 hover:border-neutral-600'}`}>
+                      <div className="flex items-center justify-between flex-wrap gap-0.5">
+                        <div className="text-xs sm:text-lg font-semibold">{c.day}</div>
+                        {isToday(c.day) && <span className="hidden sm:inline text-xs px-2 py-0.5 rounded bg-emerald-600/20 border border-emerald-600/40">今天</span>}
+                        {isToday(c.day) && <span className="sm:hidden text-[7px] px-0.5 py-0.5 rounded bg-emerald-600/20 border border-emerald-600/40">今</span>}
                       </div>
-                      <div className="mt-auto text-sm text-neutral-300">
-                        <div>工時：<span className="tabular-nums">{hours.toFixed(2)}</span> 小時</div>
-                        <div>金額：{typeof pay==='number' ? <span className="tabular-nums">{pay.toFixed(2)}</span> : '—'}</div>
+                      <div className="mt-auto text-neutral-300">
+                        <div className="hidden sm:block text-sm">
+                          <div>工時：<span className="tabular-nums">{hours.toFixed(2)}</span> 小時</div>
+                          <div>金額：{typeof pay==='number' ? <span className="tabular-nums">{pay.toFixed(2)}</span> : '—'}</div>
+                        </div>
+                        <div className="sm:hidden text-[9px] leading-tight tabular-nums">
+                          <div>{hours.toFixed(2)}h</div>
+                          {typeof pay==='number' ? <div>{pay.toFixed(2)}</div> : null}
+                        </div>
                       </div>
                     </button>
                   );
