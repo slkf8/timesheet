@@ -509,47 +509,6 @@
                     </div>
                   )}
 
-                  {/* 內嵌資料與單檔 HTML */}
-                <div className="pt-3 mt-2 border-t border-neutral-800 space-y-2">
-                  <div className="text-base font-semibold">內嵌資料 ＆ 單檔 HTML</div>
-                  <div className="flex flex-wrap gap-2">
-                    <button onClick={writeEmbeddedToDom} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">寫入本頁內嵌（暫存）</button>
-                    <button onClick={generateSelfContainedHtml} className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600">生成含資料的HTML</button>
-                    <button onClick={copyHtml} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">複製HTML</button>
-                    <button onClick={runTests} className="px-3 py-2 rounded-xl bg-neutral-800 hover:bg-neutral-700">執行自測</button>
-                  </div>
-                  {(htmlText || htmlUrl) && (
-                    <div className="space-y-2 mt-2 text-sm">
-                      <div className="flex flex-wrap gap-2">
-                        {htmlUrl && (
-                          <a href={htmlUrl} download="timesheet-with-data.html" className="px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600">下載 .html（含資料）</a>
-                        )}
-                      </div>
-                      <textarea className="w-full h-40 p-2 rounded-lg bg-neutral-950 border border-neutral-700 font-mono text-xs" readOnly value={htmlText} onFocus={(e)=>e.currentTarget.select()} />
-                      <div className="text-xs text-neutral-400">提示：若剪貼簿權限受限，請於上方文字框手動全選複製。</div>
-                    </div>
-                  )}
-
-                  {testReport && (
-                    <div className="text-xs border border-neutral-800 rounded-xl p-2">
-                      <div className={"font-semibold mb-1 " + (testReport.ok? 'text-emerald-400':'text-amber-300')}>{testReport.ok? '所有測試通過 ✅' : '部份測試未通過 ⚠️'}</div>
-                      <table className="w-full text-left text-[11px] mono">
-                        <thead className="text-neutral-400"><tr><th className="py-1 pr-2">名稱</th><th className="py-1 pr-2">got</th><th className="py-1 pr-2">exp</th><th className="py-1">結果</th></tr></thead>
-                        <tbody>
-                          {testReport.rows.map((r,i)=> (
-                            <tr key={i} className="border-t border-neutral-800">
-                              <td className="py-1 pr-2">{r.name}</td>
-                              <td className="py-1 pr-2">{r.got}</td>
-                              <td className="py-1 pr-2">{r.exp}</td>
-                              <td className="py-1">{r.pass? '✅' : '❌'}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-
                 {showPaste && (
                   <div className="space-y-2">
                     <textarea className="w-full h-32 p-2 rounded-lg bg-neutral-950 border border-neutral-700 font-mono text-xs" placeholder="在此貼上 CSV 文字..." value={pasteText} onChange={(e)=>setPasteText(e.target.value)} />
@@ -562,14 +521,6 @@
                 )}
               </div>
 
-              <div className="p-4 rounded-2xl bg-neutral-900 border border-neutral-800 text-xs leading-relaxed">
-                <div className="font-semibold mb-1">CSV 示例</div>
-                <pre className="font-mono text-[11px] bg-neutral-950 border border-neutral-800 rounded p-2 overflow-x-auto whitespace-pre-wrap">{`type,date,start,end,break_min,rate,notes\nrate,2025-11,,,,120,\nshift,2025-11-03,09:00,18:00,0,,前台\nshift,2025-12-02,14:00,22:30,0,\nrate,2025-12,,,,130,`}</pre>
-                <ul className="list-disc pl-5 space-y-1 text-neutral-300 mt-2">
-                  <li><span className="font-mono">rate</span> 行：<span className="font-mono">date</span>=YYYY-MM；<span className="font-mono">rate</span> 欄填金額；同月最後一筆生效。</li>
-                  <li><span className="font-mono">shift</span> 行：<span className="font-mono">date</span>=YYYY-MM-DD；跨午夜自動處理。</li>
-                </ul>
-              </div>
             </aside>
           </div>
 
