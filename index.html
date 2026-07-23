@@ -25,14 +25,47 @@
   </script>
 
   <div id="root"></div>
+  <div id="startup-fallback" hidden style="max-width: 42rem; margin: 1.5rem auto; padding: 1rem; border: 1px solid #991b1b; border-radius: 0.75rem; background: #2a1010; color: #f5f5f5; font-family: sans-serif;">
+    Timesheet 啟動失敗，請使用<a href="./recover.html" style="color: #6ee7b7;">資料救援頁面</a>
+  </div>
+  <script>
+    (function () {
+      var root = document.getElementById('root');
+      var fallback = document.getElementById('startup-fallback');
+      if (!root || !fallback) return;
+
+      var startupTimer;
+      var hasMounted = function () { return root.childNodes.length > 0; };
+      var hideFallback = function () {
+        fallback.hidden = true;
+        if (startupTimer) window.clearTimeout(startupTimer);
+      };
+      var showFallback = function () {
+        if (!hasMounted()) fallback.hidden = false;
+      };
+      var observer = new MutationObserver(function () {
+        if (hasMounted()) {
+          hideFallback();
+          observer.disconnect();
+        }
+      });
+
+      observer.observe(root, { childList: true });
+      window.addEventListener('error', showFallback);
+      window.addEventListener('unhandledrejection', showFallback);
+      window.addEventListener('load', function () {
+        startupTimer = window.setTimeout(showFallback, 1500);
+      });
+    })();
+  </script>
 
   <!-- React 18 + Babel Standalone (UMD) -->
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.28.5/babel.min.js"></script>
 
   <!-- 重要：指定 Babel 預設，否則 JSX 可能不被轉譯導致 Script error -->
-  <script type="text/babel" data-presets="env,react">
+  <script type="text/babel" data-presets="react">
         if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js', { scope: './' });
