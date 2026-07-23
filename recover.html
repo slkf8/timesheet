@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Timesheet 資料救援</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0a0a0a;
+      color: #f5f5f5;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 1.6rem; margin: 0 0 12px; }
+    .card {
+      border: 1px solid #333;
+      background: #171717;
+      border-radius: 16px;
+      padding: 16px;
+      margin: 14px 0;
+    }
+    .warning { border-color: #92400e; background: #27170b; }
+    .ok { border-color: #166534; background: #0d2417; }
+    .error { border-color: #991b1b; background: #2a1010; }
+    button {
+      appearance: none;
+      border: 1px solid #555;
+      background: #262626;
+      color: white;
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin: 4px 4px 4px 0;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    button.primary { background: #047857; border-color: #059669; }
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      resize: vertical;
+      border: 1px solid #444;
+      border-radius: 12px;
+      padding: 12px;
+      background: #050505;
+      color: #e5e5e5;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+    code { word-break: break-all; }
+    .muted { color: #a3a3a3; font-size: 0.92rem; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Timesheet 資料救援</h1>
+
+  <div class="card warning">
+    <strong>重要：</strong>請在仍保存原始工時資料的舊手機上開啟本頁。
+    在成功下載或複製之前，不要清除 Safari 網站資料、移除主畫面 Web App、重設手機或刪除瀏覽器。
+  </div>
+
+  <div id="status" class="card">正在讀取本機資料……</div>
+
+  <div id="actions" class="card hidden">
+    <button class="primary" id="downloadCsv">下載 timesheet.csv</button>
+    <button id="copyCsv">複製 CSV</button>
+    <button id="downloadJson">下載原始 JSON</button>
+    <button id="copyJson">複製原始 JSON</button>
+  </div>
+
+  <div id="csvBox" class="card hidden">
+    <strong>CSV 內容</strong>
+    <p class="muted">下載失敗時，可點入文字框後全選並複製。</p>
+    <textarea id="csvText" readonly></textarea>
+  </div>
+
+  <div class="card">
+    <strong>讀取位置</strong>
+    <p class="muted">來源：此網域的 <code>localStorage</code></p>
+    <p class="muted">鍵名：<code>timesheet-master-data-v1</code></p>
+    <p class="muted">本頁不會修改或刪除原始資料。</p>
+  </div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const DATA_KEY = "timesheet-master-data-v1";
+  const statusEl = document.getElementById("status");
+  const actionsEl = document.getElementById("actions");
+  const csvBoxEl = document.getElementById("csvBox");
+  const csvTextEl = document.getElementById("csvText");
+
+  function setStatus(type, html) {
+    statusEl.className = "card " + type;
+    statusEl.innerHTML = html;
+  }
+
+  function toCsv(data) {
+    const rows = [
+      "# Timesheet Master CSV",
+      "type,date,start,end,break_min,rate,notes"
+    ];
+
+    const rates = data && data.rateByMonth && typeof data.rateByMonth === "object"
+      ? data.rateByMonth
+      : {};
+
+    Object.keys(rates).sort().forEach((ym) => {
+      const rate = rates[ym];
+      if (typeof rate === "number" && Number.isFinite(rate)) {
+        rows.push(["rate", ym, "", "", "", String(rate), ""].join(","));
+      }
+    });
+
+    const shifts = Array.isArray(data && data.shifts) ? [...data.shifts] : [];
+    shifts.sort((a, b) =>
+      String(a.date || "").localeCompare(String(b.date || "")) ||
+      String(a.start || "").localeCompare(String(b.start || ""))
+    );
+
+    shifts.forEach((s) => {
+      const notes = String(s.notes || "").replace(/\r?\n/g, " ");
+      rows.push([
+        "shift",
+        String(s.date || ""),
+        String(s.start || ""),
+        String(s.end || ""),
+        String(Number(s.breakMin || 0)),
+        "",
+        notes
+      ].join(","));
+    });
+
+    return rows.join("\n");
+  }
+
+  function downloadText(filename, text, type) {
+    const blob = new Blob([text], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  async function copyText(text, label) {
+    try {
+      await navigator.clipboard.writeText(text);
+      alert(label + "已複製。");
+    } catch (_) {
+      csvTextEl.value = text;
+      csvTextEl.focus();
+      csvTextEl.select();
+      alert("瀏覽器未允許自動複製；已選取文字，請使用「複製」。");
+    }
+  }
+
+  try {
+    const raw = localStorage.getItem(DATA_KEY);
+
+    if (!raw) {
+      setStatus(
+        "error",
+        "<strong>找不到 Timesheet 資料。</strong><br><br>" +
+        "這通常表示：本頁不是在原本保存資料的手機／瀏覽器中開啟，" +
+        "或資料原本是在主畫面 Web App 的獨立儲存區。"
+      );
+      return;
+    }
+
+    const data = JSON.parse(raw);
+    const csv = toCsv(data);
+    const shifts = Array.isArray(data.shifts) ? data.shifts : [];
+    const rates = data.rateByMonth && typeof data.rateByMonth === "object"
+      ? Object.keys(data.rateByMonth)
+      : [];
+
+    csvTextEl.value = csv;
+    actionsEl.classList.remove("hidden");
+    csvBoxEl.classList.remove("hidden");
+
+    setStatus(
+      "ok",
+      "<strong>已找到資料。</strong><br><br>" +
+      "工時紀錄：" + shifts.length + " 筆<br>" +
+      "時薪月份：" + rates.length + " 個<br><br>" +
+      "請立即下載 CSV，並同時下載原始 JSON 作第二份備份。"
+    );
+
+    document.getElementById("downloadCsv").addEventListener("click", () => {
+      downloadText("timesheet.csv", csv, "text/csv;charset=utf-8");
+    });
+
+    document.getElementById("copyCsv").addEventListener("click", () => {
+      copyText(csv, "CSV");
+    });
+
+    document.getElementById("downloadJson").addEventListener("click", () => {
+      downloadText("timesheet-backup.json", raw, "application/json;charset=utf-8");
+    });
+
+    document.getElementById("copyJson").addEventListener("click", () => {
+      copyText(raw, "JSON");
+    });
+  } catch (error) {
+    setStatus(
+      "error",
+      "<strong>讀取失敗。</strong><br><br>" +
+      String(error && error.message ? error.message : error)
+    );
+  }
+})();
+</script>
+</body>
+</html>
